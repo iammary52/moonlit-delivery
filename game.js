@@ -3,6 +3,23 @@
 const $ = (id) => document.getElementById(id);
 const canvas = $("game");
 const ctx = canvas.getContext("2d");
+let canvasScale = 1;
+
+function resizeCanvas() {
+  const displayWidth = canvas.getBoundingClientRect().width;
+  const pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
+  const width = Math.min(3840, Math.max(16, Math.round(displayWidth * pixelRatio / 16) * 16));
+  if (canvas.width !== width) {
+    canvas.width = width;
+    canvas.height = width * 9 / 16;
+  }
+  canvasScale = width / 1440;
+}
+
+new ResizeObserver(resizeCanvas).observe(canvas);
+window.addEventListener("resize", resizeCanvas);
+resizeCanvas();
+
 const chapters = [
   "노을 정거장", "솔방울 고갯길", "별빛 오솔길", "단풍 우체국", "달안개 골짜기", "보름달 종착역",
 ];
@@ -17,6 +34,7 @@ const enemyTypes = {
   dash: { hp: 47, r: 25, speed: 88, damage: 13, radius: 78, warn: .63 },
   shell: { hp: 82, r: 34, speed: 43, damage: 17, radius: 79, warn: .86 },
   boss: { hp: 430, r: 63, speed: 45, damage: 22, radius: 150, warn: 1.18 },
+  gold: { hp: 57, r: 25, speed: 128, damage: 0, radius: 40, warn: 0 },
 };
 const keySets = [
   { left: "KeyA", right: "KeyD", up: "KeyW", down: "KeyS", attack: "KeyF", dodge: "KeyG" },
@@ -40,11 +58,18 @@ let nextAction = null;
 let pausedFrom = "playing";
 let players = [];
 let enemies = [];
+let crates = [];
 let items = [];
 let effects = [];
 let projectiles = [];
 let upgrades = { power: 0, speed: 0, spark: 0 };
 let roundStartUpgrades = { ...upgrades };
+let starLevel = 0;
+let roundStartStarLevel = 0;
+let comboCharge = 0;
+let feverTime = 0;
+let feverPulse = 0;
+let eventAt = 0;
 let round = 0;
 let spawn = [];
 let spawnWait = 0;
@@ -74,6 +99,8 @@ function readSave() {
         !Array.isArray(data.choices) || data.choices.length !== 2 || data.choices[0] === data.choices[1] ||
         data.choices.some((pick) => !Number.isInteger(pick) || !CAST[pick])) return null;
     if (!data.upgrades || upgradeKeys.some((key) => !Number.isInteger(data.upgrades[key]) || data.upgrades[key] < 0 || data.upgrades[key] > totalWaves * 4)) return null;
+    data.starLevel ??= 0;
+    if (!Number.isInteger(data.starLevel) || data.starLevel < 0 || data.starLevel > 3) return null;
     return data;
   } catch {
     return null;
@@ -82,7 +109,7 @@ function readSave() {
 
 function saveProgress(at) {
   try {
-    if (at < totalWaves) localStorage.setItem(saveKey, JSON.stringify({ round: at, upgrades, choices }));
+    if (at < totalWaves) localStorage.setItem(saveKey, JSON.stringify({ round: at, upgrades, choices, starLevel }));
     else localStorage.removeItem(saveKey);
   } catch {
     // The game still works when browser storage is unavailable.
@@ -148,15 +175,22 @@ function openSelection() {
   $("slot1").focus({ preventScroll: true });
 }
 
+function drawPortrait(preview, character, time) {
+  const context = preview.getContext("2d");
+  context.setTransform(2, 0, 0, 2, 0, 0);
+  context.clearRect(0, 0, 256, 286);
+  Art.hero(context, { cast: character, x: 128, y: 260, face: 1 }, time, 1.88);
+}
+
 CAST.forEach((character, i) => {
   const card = document.createElement("button");
   card.className = "character";
   card.style.setProperty("--accent", character.color);
   const preview = document.createElement("canvas");
-  preview.width = 136;
-  preview.height = 103;
+  preview.width = 512;
+  preview.height = 572;
   preview.setAttribute("aria-hidden", "true");
-  Art.hero(preview.getContext("2d"), { cast: character, x: 67, y: 94, face: 1 }, i, .84);
+  drawPortrait(preview, character, i);
   const title = document.createElement("strong");
   title.textContent = character.name;
   const owner = document.createElement("span");
@@ -175,6 +209,21 @@ CAST.forEach((character, i) => {
   $("roster").append(card);
 });
 
+const loadingCaption = $("menu").querySelector(".caption");
+const readyCaption = loadingCaption.textContent;
+loadingCaption.textContent = "배달원을 준비하고 있어요…";
+$("openSelect").disabled = true;
+$("startGame").disabled = true;
+Art.heroesReady.then(() => {
+  $("openSelect").disabled = false;
+  $("startGame").disabled = false;
+  loadingCaption.textContent = readyCaption;
+  CAST.forEach((character, i) => {
+    const preview = $("roster").children[i].querySelector("canvas");
+    drawPortrait(preview, character, i);
+  });
+});
+
 for (const i of [0, 1]) {
   $("slot" + (i + 1)).onclick = () => { selectedSlot = i; refreshSelection(); };
 }
@@ -184,8 +233,10 @@ function freshPlayer(i, kind) {
   return {
     cast, x: 618 + i * 204, y: 524, vx: 0, vy: 0, directionX: i ? -1 : 1,
     directionY: 0, face: i ? -1 : 1, phase: i * 1.71, label: (i + 1) + "P",
+    renderDirectionX: i ? -.4 : .4, renderDirectionY: 1,
     hp: cast.hp, cd: .12, invulnerable: .85, dash: 0, dodgeDelay: 0, dodgeHeld: false,
-    down: false, revive: 0, anim: 0, moving: false,
+    down: false, revive: 0, anim: 0, hurtPose: 0, moving: false,
+    starCooldown: .3 + i * .2,
   };
 }
 
@@ -195,10 +246,14 @@ function start(save) {
     round = save.round;
     choices = [...save.choices];
     upgrades = { ...save.upgrades };
+    starLevel = save.starLevel || 0;
   } else {
     round = 0;
     upgrades = { power: 0, speed: 0, spark: 0 };
+    starLevel = 0;
   }
+  comboCharge = 0;
+  feverTime = 0;
   saveProgress(round);
   startRound();
 }
@@ -218,11 +273,18 @@ function describeRound() {
 
 function startRound() {
   roundStartUpgrades = { ...upgrades };
+  roundStartStarLevel = starLevel;
   players = choices.map((kind, i) => freshPlayer(i, kind));
   enemies = [];
   projectiles = [];
   items = [];
   effects = [];
+  const parcelLocations = [[360, 338], [1080, 601], [1080, 338], [360, 601]];
+  crates = [0, 1].map((i) => {
+    const [x, y] = parcelLocations[(i + round * 2) % parcelLocations.length];
+    return { kind: "crate", x, y, r: 25, hp: 38 + chapterIndex() * 8, flash: 0, reward: upgradeKeys[(round + i) % upgradeKeys.length] };
+  });
+  eventAt = 11;
   clearedTime = 0;
   activeTime = 0;
   freeze = 0;
@@ -267,6 +329,11 @@ function updateHud() {
   $("chapter").textContent = (chapterIndex() + 1) + "장 · " + chapters[chapterIndex()];
   $("wave").textContent = "라운드 " + (waveIndex() + 1) + " / " + wavesPerChapter;
   $("remaining").textContent = "남은 슬라임 " + (spawn.length + enemies.length);
+  $("feverLabel").textContent = feverTime > 0 ? "피버! " + Math.ceil(feverTime) + "초" : "콤보 " + comboCharge + " / 12";
+  $("feverFill").style.width = (feverTime > 0 ? feverTime / 8 : comboCharge / 12) * 100 + "%";
+  $("feverMeter").classList.toggle("active", feverTime > 0);
+  $("feverMeter").setAttribute("aria-label", $("feverLabel").textContent);
+  $("companionLevel").textContent = starLevel ? "✦ 별친구 " + starLevel : "";
   players.forEach((p, i) => {
     const box = $("life" + (i + 1));
     box.style.setProperty("--accent", p.cast.color);
@@ -379,7 +446,7 @@ $("sound").onclick = () => {
 $("fullscreen").onclick = async () => {
   try {
     if (document.fullscreenElement) await document.exitFullscreen();
-    else await $("stage").requestFullscreen();
+    else await document.documentElement.requestFullscreen();
   } catch {
     $("fullscreen").textContent = "전체 화면 사용 불가";
   }
@@ -420,6 +487,7 @@ function spawnEnemy(kind) {
   enemies.push({
     ...type, kind, x, y, hp, max: hp, phase: random(0, 20), wind: 0, flash: 0,
     kx: 0, ky: 0, delay: 1.45, fresh: .52, lastBy: -1, lastHit: -10, combo: 0,
+    escapeTime: 16,
   });
   ring(x,y,type.r * 1.7, kind === "boss" ? "#ffe598" : "#c9ef91");
   if (kind === "boss") showNotice("왕관 슬라임 등장!", 2.35);
@@ -428,6 +496,18 @@ function spawnEnemy(kind) {
 
 function hit(e, damage, player, p, chain = false) {
   if (e.hp <= 0) return false;
+  if (e.kind === "crate") {
+    e.hp = Math.max(0, e.hp - Math.round(damage));
+    e.flash = .15;
+    burst(e.x, e.y - 23, "#ffcb8e", e.hp ? 5 : 18, e.hp ? 110 : 210);
+    if (e.hp === 0) {
+      const needsHealth = players.some((hero) => !hero.down && hero.hp < hero.cast.hp * .55);
+      items.push({ x: e.x, y: e.y, kind: needsHealth ? "heal" : e.reward });
+      ring(e.x, e.y, 87, "#ffe5a2");
+      tone([330, 495, 660], "triangle", .048, .16);
+    }
+    return true;
+  }
   const amount = Math.round(damage);
   e.hp = Math.max(0, e.hp - amount);
   e.flash = .115;
@@ -487,14 +567,18 @@ function doChain(first, rawDamage, player, p) {
 
 function attack(p, i) {
   const c = p.cast;
-  const power = 1 + upgrades.power * .28;
+  const power = (1 + upgrades.power * .28) * (feverTime > 0 ? 1.3 : 1);
   const range = c.range * (1 + Math.min(.85, upgrades.power * .11));
   const candidates = enemies.filter((e) => e.hp > 0 && distance(p, e) <= range + e.r * .65)
     .sort((a,b) => distance(p,a) - distance(p,b));
+  candidates.push(...crates.filter((crate) => crate.hp > 0 && distance(p, crate) <= range + crate.r * .65)
+    .sort((a,b) => distance(p,a) - distance(p,b)));
   const target = candidates[0];
   const angle = target ? Math.atan2((target.y-p.y) * 1.65, target.x-p.x) : Math.atan2(p.directionY * 1.45, p.directionX);
   p.face = Math.cos(angle) < 0 ? -1 : 1;
-  p.cd = c.rate / (1 + Math.min(1.65, upgrades.speed * .2));
+  p.renderDirectionX = Math.cos(angle);
+  p.renderDirectionY = Math.sin(angle);
+  p.cd = c.rate / (1 + Math.min(1.65, upgrades.speed * .2)) / (feverTime > 0 ? 1.6 : 1);
   p.anim = .24;
   let connected = false;
 
@@ -507,8 +591,17 @@ function attack(p, i) {
   } else {
     const width = c.kind === "hammer" ? 2.05 : c.kind === "shield" ? 1.85 : 1.05;
     const sweep = range * (c.kind === "glove" ? .86 : 1);
-    effects.push({ x: p.x, y: p.y - 27, arc: sweep, color: c.color, angle, width, life: .31, max: .31, vx: 0, vy: 0 });
-    ring(p.x, p.y - 7, sweep, c.color, angle, width);
+    if (c.kind === "glove") {
+      p.punchSide = -(p.punchSide || 1);
+      effects.push({ x: p.x, y: p.y - 35, punch: sweep, side: p.punchSide, angle, life: .21, max: .21, vx: 0, vy: 0 });
+    } else if (c.kind === "shield") {
+      effects.push({ x: p.x, y: p.y - 9, leaves: sweep, life: .42, max: .42, vx: 0, vy: 0 });
+    } else {
+      effects.push({ x: p.x, y: p.y - 27, arc: sweep, color: c.color, angle, width, life: .31, max: .31, vx: 0, vy: 0 });
+      const impactX = target?.x ?? p.x + Math.cos(angle) * sweep * .55;
+      const impactY = target?.y ?? p.y + Math.sin(angle) * sweep * .33;
+      effects.push({ x: impactX, y: impactY, impact: 75 + upgrades.power * 6, life: .39, max: .39, vx: 0, vy: 0 });
+    }
     for (let n = 0; n < 6; n++) {
       const sparkAngle = angle + random(-width, width);
       const offset = sweep * random(.46, .86);
@@ -524,7 +617,7 @@ function attack(p, i) {
       const ally = players[1 - i];
       if (distance(p, ally) < 158 && !ally.down) {
         ally.invulnerable = Math.max(ally.invulnerable, .22);
-        if (connected) ring(ally.x, ally.y - 16, 61, c.color);
+        effects.push({ x: ally.x, y: ally.y - 10, leaves: 61, life: .42, max: .42, vx: 0, vy: 0 });
       }
     }
   }
@@ -545,8 +638,15 @@ function advanceProjectiles(dt) {
     const len = Math.hypot(tx - bolt.x, ty - bolt.y);
     bolt.life -= dt;
     if (len < 1200 * dt + 10) {
-      if (hit(bolt.e, bolt.damage, bolt.player, bolt.caster)) {
-        doChain(bolt.e, bolt.damage, bolt.player, bolt.caster);
+      if (hit(bolt.e, bolt.damage, bolt.player, bolt.caster, !!bolt.companion)) {
+        if (!bolt.companion) {
+          doChain(bolt.e, bolt.damage, bolt.player, bolt.caster);
+          ring(bolt.e.x, bolt.e.y - 13, 68, "#bdf5ef");
+          burst(bolt.e.x, bolt.e.y - 31, "#effff2", 13, 180);
+          for (const other of enemies) {
+            if (other !== bolt.e && other.hp > 0 && distance(bolt.e, other) < 68) hit(other, bolt.damage * .25, bolt.player, bolt.caster, true);
+          }
+        }
         shake = Math.max(shake, 2.1);
         tone([520, 290], "triangle", .057, .105);
       }
@@ -555,13 +655,14 @@ function advanceProjectiles(dt) {
     }
     bolt.x += (tx - bolt.x) / len * 1200 * dt;
     bolt.y += (ty - bolt.y) / len * 1200 * dt;
-    particle(bolt.x,bolt.y,"#befae3",29);
+    particle(bolt.x, bolt.y, bolt.companion ? "#ffe69c" : "#befae3", 29);
   }
   projectiles = projectiles.filter((bolt) => bolt.life > 0);
 }
 
 function damagePlayer(p, amount, e) {
   if (p.invulnerable > 0 || p.down || p.dash > 0) return;
+  if (feverTime <= 0) comboCharge = Math.max(0, comboCharge - 3);
   const index = players.indexOf(p);
   const ally = players[1 - index];
   let damage = amount * (p.cast.kind === "shield" ? .63 : 1);
@@ -570,6 +671,7 @@ function damagePlayer(p, amount, e) {
     ring(p.x, p.y - 17, 45, ally.cast.color);
   }
   p.hp = Math.max(0, p.hp - Math.round(damage));
+  p.hurtPose = .18;
   p.invulnerable = 1.05;
   const a = Math.atan2(p.y - e.y, p.x - e.x);
   p.vx += Math.cos(a) * 190;
@@ -587,6 +689,7 @@ function advancePlayer(p, i, dt) {
   p.invulnerable -= dt;
   p.dodgeDelay -= dt;
   p.anim = Math.max(0, p.anim - dt);
+  p.hurtPose = Math.max(0, p.hurtPose - dt);
   if (p.down) {
     const partner = players[1 - i];
     if (!partner.down && distance(p, partner) < 111) {
@@ -607,6 +710,10 @@ function advancePlayer(p, i, dt) {
     p.directionX = control.x;
     p.directionY = control.y;
     if (Math.abs(control.x) > .09) p.face = Math.sign(control.x);
+    if (p.anim <= 0) {
+      p.renderDirectionX = control.x;
+      p.renderDirectionY = control.y;
+    }
   }
   if (control.dodge && !p.dodgeHeld && p.dodgeDelay <= 0) {
     p.dash = .23;
@@ -624,9 +731,27 @@ function advancePlayer(p, i, dt) {
   p.vy += (ty - p.vy) * ease;
   p.x = clamp(p.x + p.vx * dt, bounds.left, bounds.right);
   p.y = clamp(p.y + p.vy * dt, bounds.top, bounds.bottom);
+  for (const crate of crates) {
+    if (crate.hp <= 0) continue;
+    const dx = p.x - crate.x;
+    const dy = (p.y - crate.y) * 1.48;
+    const length = Math.hypot(dx, dy);
+    if (length < 44) {
+      const push = 44 - length;
+      p.x += (length > .01 ? dx / length : p.face) * push;
+      p.y += (length > .01 ? dy / length : 0) * push / 1.48;
+    }
+  }
   p.moving = Math.hypot(p.vx, p.vy) > 36;
   if (p.dash > 0 && dashTrail < dt) particle(p.x, p.y - 12, p.cast.color, 70);
   if (control.attack && p.cd <= 0 && p.dash < .12) attack(p, i);
+  p.starCooldown -= dt;
+  if (starLevel > 0 && p.starCooldown <= 0) {
+    const target = enemies.filter((e) => e.hp > 0 && distance(p, e) < 435)
+      .sort((a,b) => distance(p,a) - distance(p,b))[0];
+    p.starCooldown = 1.25 / (1 + starLevel * .18);
+    if (target) projectiles.push({ x: p.x, y: p.y - 85, e: target, caster: p, player: i, damage: 9 + starLevel * 4 + upgrades.power * 2, life: .66, companion: true });
+  }
 }
 
 function updateEnemy(e, dt) {
@@ -636,6 +761,20 @@ function updateEnemy(e, dt) {
   const closest = players.filter((p) => !p.down).sort((a,b) => distance(a,e) - distance(b,e))[0];
   if (!closest || e.fresh > 0) return;
   const range = distance(e,closest);
+  if (e.kind === "gold") {
+    e.escapeTime -= dt;
+    if (e.escapeTime <= 0) {
+      e.escaped = true;
+      burst(e.x, e.y - 20, "#ffd47b", 16, 160);
+      return;
+    }
+    const angle = range < 190 ? Math.atan2(e.y - closest.y, e.x - closest.x) : time * .95 + e.phase;
+    e.x = clamp(e.x + (Math.cos(angle) * e.speed + e.kx) * dt, bounds.left + 12, bounds.right - 12);
+    e.y = clamp(e.y + (Math.sin(angle) * e.speed * .7 + e.ky) * dt, bounds.top + 12, bounds.bottom - 12);
+    e.kx *= Math.exp(-dt * 9.5);
+    e.ky *= Math.exp(-dt * 9.5);
+    return;
+  }
   if (e.wind > 0) {
     e.wind -= dt;
     if (e.wind <= 0) {
@@ -662,6 +801,9 @@ function collect(item, display = true) {
   if (item.kind === "heal") {
     for (const p of players) if (!p.down) p.hp = Math.min(p.cast.hp, p.hp + 34);
     if (display) showNotice("별사탕 · 두 배달원 체력 +34", 1.8);
+  } else if (item.kind === "star") {
+    starLevel = Math.min(3, starLevel + 1);
+    if (display) showNotice("별친구 " + starLevel + " · 함께 공격해요!", 2.7);
   } else {
     upgrades[item.kind]++;
     if (display) showNotice(upgradeNames[item.kind] + " +" + upgrades[item.kind] + " · " + upgradeEffects[item.kind], 2.5);
@@ -675,7 +817,7 @@ function collect(item, display = true) {
 
 function awardRound() {
   const guaranteed = upgradeKeys[round % upgradeKeys.length];
-  for (const item of items) if (item.kind === "heal") collect(item, false);
+  for (const item of items) if (item.kind === "heal" || item.kind === "star" || item.bonus) collect(item, false);
   items = [];
   collect({ kind: guaranteed, x: 720, y: 645 }, false);
   updateHud();
@@ -696,14 +838,81 @@ function awardRound() {
   });
 }
 
+function awardKill(e) {
+  if (feverTime <= 0) {
+    comboCharge++;
+    if (comboCharge >= 12) {
+      comboCharge = 0;
+      feverTime = 8;
+      feverPulse = 0;
+      showNotice("피버! · 더 빠르게, 더 강하게!", 2.4);
+      for (const p of players) {
+        ring(p.x, p.y, 195, "#ffd682");
+        burst(p.x, p.y - 55, "#ffdf8c", 24, 265);
+      }
+      tone([392, 523, 659, 784, 1047], "sine", .056, .24);
+    }
+  }
+  if (e.kind === "gold") {
+    const prizes = [upgradeKeys[round % 3], upgradeKeys[(round + 1) % 3],
+      starLevel < 3 && (starLevel === 0 || Math.random() < .35) ? "star" : "heal"];
+    prizes.forEach((kind, i) => items.push({ x: clamp(e.x + (i - 1) * 38, bounds.left, bounds.right), y: e.y, kind, bonus: true }));
+    ring(e.x, e.y, 145, "#ffe99b");
+    burst(e.x, e.y - 20, "#ffdf79", 28, 270);
+    floatText(e.x, e.y - 70, "보물 발견!", "#fff2b1");
+    tone([659, 784, 1047, 1319], "sine", .052, .22);
+    return;
+  }
+  if (e.kind === "boss" || Math.random() < .23) {
+    const kind = e.kind !== "boss" && Math.random() < .58 ? "heal" : upgradeKeys[Math.floor(random(0, 3))];
+    items.push({ kind, x: e.x, y: e.y });
+  }
+}
+
+function roundEvent() {
+  if (round % 3 !== 2) {
+    spawnEnemy("gold");
+    showNotice("황금 슬라임! · 달아나기 전에 잡아 보세요", 3);
+  } else {
+    const prizes = ["power", "speed", "spark", "heal"];
+    prizes.forEach((kind, i) => {
+      const x = 420 + (i % 2) * 600;
+      const y = 340 + Math.floor(i / 2) * 270;
+      items.push({ x, y, kind, bonus: true });
+      ring(x, y, 105, "#ffdc87");
+      burst(x, y - 18, "#ffdf98", 16, 180);
+    });
+    showNotice("선물 소나기! · 광장 곳곳에 장비가 도착했어요", 3);
+    tone([523, 659, 784, 1047], "sine", .05, .19);
+  }
+}
+
 function update(dt) {
   noticeTime -= dt;
   if (noticeTime <= 0) $("notice").hidden = true;
   dashTrail -= dt;
   if (dashTrail < 0) dashTrail += .075;
+  feverTime = Math.max(0, feverTime - dt);
+  if (feverTime > 0) {
+    feverPulse -= dt;
+    if (feverPulse <= 0) {
+      feverPulse = .75;
+      players.forEach((p, i) => {
+        if (p.down) return;
+        ring(p.x, p.y, 170, "#ffe39b");
+        for (const e of enemies) if (e.hp > 0 && distance(p, e) < 170) hit(e, 16 + upgrades.power * 2, i, p, true);
+      });
+    }
+  }
   players.forEach((p,i) => advancePlayer(p,i,dt));
   advanceProjectiles(dt);
   activeTime += dt;
+  if (activeTime >= eventAt && (spawn.length || enemies.length)) {
+    roundEvent();
+    eventAt = Infinity;
+  }
+  for (const crate of crates) crate.flash = Math.max(0, crate.flash - dt);
+  crates = crates.filter((crate) => crate.hp > 0);
   if (spawn.length && activeTime >= supplyAt) {
     const corners = [{ x: 306, y: 318 }, { x: 1135, y: 633 }, { x: 307, y: 632 }, { x: 1134, y: 320 }];
     const point = corners[(round + Math.floor(supplyAt)) % corners.length];
@@ -721,11 +930,9 @@ function update(dt) {
   }
   for (const e of enemies) if (e.hp > 0) updateEnemy(e,dt);
   enemies = enemies.filter((e) => {
+    if (e.escaped) return false;
     if (e.hp > 0) return true;
-    if (e.kind === "boss" || Math.random() < .23) {
-      const kind = e.kind !== "boss" && Math.random() < .58 ? "heal" : upgradeKeys[Math.floor(random(0,3))];
-      items.push({ kind, x: e.x, y: e.y });
-    }
+    awardKill(e);
     return false;
   });
   for (const item of items) {
@@ -739,8 +946,15 @@ function update(dt) {
   if (players.every((p) => p.down)) {
     showBreak("retry", "달빛 특송", "다시 도전해 볼까요?", "이번 라운드 시작 지점에서 다시 만나요.", "라운드 재도전", () => {
       const saved = readSave();
-      if (saved?.round === round) upgrades = { ...saved.upgrades };
-      else upgrades = { ...roundStartUpgrades };
+      if (saved?.round === round) {
+        upgrades = { ...saved.upgrades };
+        starLevel = saved.starLevel;
+      } else {
+        upgrades = { ...roundStartUpgrades };
+        starLevel = roundStartStarLevel;
+      }
+      comboCharge = 0;
+      feverTime = 0;
       startRound();
     });
   } else if (!enemies.length && !spawn.length) {
@@ -756,6 +970,7 @@ function update(dt) {
 
 
 function draw() {
+  ctx.setTransform(canvasScale, 0, 0, canvasScale, 0, 0);
   const isTitle = screen === "menu" || screen === "select";
   Art.background(ctx, time, isTitle ? 0 : chapterIndex(), isTitle);
   if (isTitle) {
@@ -780,10 +995,19 @@ function draw() {
     }
   } }));
   for (const e of enemies) actors.push({ y: e.y, draw: () => Art.enemy(ctx,e,time) });
+  for (const crate of crates) actors.push({ y: crate.y, draw: () => Art.parcel(ctx, crate, time) });
   actors.sort((a,b) => a.y - b.y).forEach((actor) => actor.draw());
+  for (const p of players) {
+    if (p.down) continue;
+    if (feverTime > 0) Art.fever(ctx, p, time);
+    for (let i = 0; i < starLevel; i++) {
+      const angle = time * 2.3 + i * Math.PI * 2 / starLevel + p.phase;
+      Art.companion(ctx, p.x + Math.cos(angle) * 43, p.y - 69 + Math.sin(angle) * 17, time + i);
+    }
+  }
   for (const bolt of projectiles) {
-    Art.oval(ctx,bolt.x,bolt.y,16,16,"#c4fbe940");
-    Art.star(ctx,bolt.x,bolt.y,11,"#e7fff0","#7cbdad");
+    Art.oval(ctx, bolt.x, bolt.y, 16, 16, bolt.companion ? "#ffdd7e40" : "#c4fbe940");
+    Art.star(ctx, bolt.x, bolt.y, bolt.companion ? 9 : 12, bolt.companion ? "#fff1b5" : "#e7fff0", "#7cbdad", 5);
   }
   for (const effect of effects) Art.effect(ctx, effect);
   ctx.restore();

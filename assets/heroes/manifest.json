@@ -1,0 +1,49 @@
+{
+  "tileWidth": 512,
+  "tileHeight": 640,
+  "columns": 4,
+  "rows": 4,
+  "frames": 16,
+  "anchor": {
+    "x": 256,
+    "y": 566
+  },
+  "views": [
+    "front"
+  ],
+  "mirrorHorizontal": true,
+  "states": {
+    "idle": {
+      "offset": 0,
+      "frames": 4
+    },
+    "run": {
+      "offset": 4,
+      "frames": 4
+    },
+    "attack": {
+      "offset": 8,
+      "frames": 4
+    },
+    "dash": {
+      "offset": 12,
+      "frames": 2
+    },
+    "hurt": {
+      "offset": 14,
+      "frames": 1
+    },
+    "down": {
+      "offset": 15,
+      "frames": 1
+    }
+  },
+  "characters": {
+    "hammer": "hammer.webp",
+    "wand": "wand.webp",
+    "glove": "glove.webp",
+    "shield": "shield.webp"
+  },
+  "renderer": "Hand-drawn 2D sprite animation",
+  "version": 4
+}

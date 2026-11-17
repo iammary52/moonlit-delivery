@@ -6,9 +6,9 @@
   <meta name="theme-color" content="#111710">
   <meta name="description" content="장난감 숲을 달리는 두 배달원의 로컬 협동 액션 게임">
   <title>달빛 특송 · Moonlit Delivery</title>
-  <link rel="stylesheet" href="style.css">
-  <script src="art.js" defer></script>
-  <script src="game.js" defer></script>
+  <link rel="stylesheet" href="style.css?v=4">
+  <script src="art.js?v=4" defer></script>
+  <script src="game.js?v=4" defer></script>
 </head>
 <body>
 <header class="top shell">
@@ -20,7 +20,7 @@
     <canvas id="game" width="1440" height="810" aria-label="두 배달원과 슬라임이 등장하는 게임 화면"></canvas>
     <div id="hud" hidden>
       <div class="life" id="life1"></div>
-      <div class="mission"><span id="chapter"></span><strong id="wave"></strong><span id="remaining"></span></div>
+      <div class="mission"><span id="chapter"></span><strong id="wave"></strong><span id="remaining"></span><div id="feverMeter"><i id="feverFill"></i><span id="feverLabel"></span></div><span id="companionLevel"></span></div>
       <div class="life right" id="life2"></div>
     </div>
     <div id="notice" aria-live="polite" hidden></div>

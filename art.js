@@ -11,6 +11,32 @@ const Art = (() => {
   const TAU = Math.PI * 2;
   const ink = "#392a2b";
   const boards = new Map();
+  const heroSheets = new Map();
+  let heroLoadFinished = false;
+  const heroesReady = Promise.all(CAST.map((character) => {
+    const sheet = new Image();
+    sheet.decoding = "async";
+    return new Promise((resolve) => {
+      sheet.onload = async () => {
+        try {
+          await sheet.decode();
+          if (sheet.naturalWidth !== 2048 || sheet.naturalHeight !== 2560) {
+            resolve(null);
+            return;
+          }
+          resolve(sheet);
+        } catch {
+          resolve(null);
+        }
+      };
+      sheet.onerror = () => resolve(null);
+      sheet.src = "assets/heroes/" + character.kind + ".webp?v=4";
+    });
+  })).then((sheets) => {
+    if (sheets.every(Boolean)) sheets.forEach((sheet, i) => heroSheets.set(CAST[i].kind, sheet));
+    heroLoadFinished = true;
+    return sheets.map(Boolean);
+  });
   const lights = Array.from({ length: 45 }, (_, i) => ({
     x: (i * 237.386) % 1490, y: 140 + (i * 142.789) % 650, phase: i * 1.893,
     radius: 1 + (i * 1.561) % 3.4,
@@ -71,7 +97,7 @@ const Art = (() => {
     function getBoard(index) {
       if (!boards.has(index)) {
         const asset = new Image();
-        asset.src = "assets/board-" + (index + 1) + ".jpg";
+        asset.src = "assets/board-" + (index + 1) + ".jpg?v=4";
         boards.set(index, asset);
       }
       return boards.get(index);
@@ -148,6 +174,54 @@ const Art = (() => {
   }
 
   function hero(ctx, p, time, scale = 1) {
+    const sheet = heroSheets.get(p.cast.kind);
+    if (!sheet) {
+      if (heroLoadFinished) fallbackHero(ctx, p, time, scale);
+      return;
+    }
+
+    const dx = p.renderDirectionX ?? (p.face || 1) * .4;
+    const face = Math.abs(dx) > .06 ? Math.sign(dx) : p.face || 1;
+    let pose = Math.floor(time * 4 + (p.phase || 0)) % 4;
+    if (p.down) pose = 15;
+    else if (p.hurtPose > 0) pose = 14;
+    else if (p.dash > 0) pose = p.dash > .115 ? 12 : 13;
+    else if (p.anim > 0) {
+      pose = 8 + Math.min(3, Math.max(0, Math.floor((1 - p.anim / .24) * 4)));
+    } else if (p.moving) {
+      pose = 4 + Math.floor(time * (p.cast.kind === "glove" ? 14 : 12) + (p.phase || 0)) % 4;
+    }
+
+    ctx.save();
+    ctx.translate(p.x, p.y);
+    ctx.scale(scale, scale);
+    const shadow = ctx.createRadialGradient(0, 0, 4, 0, 0, 33);
+    shadow.addColorStop(0, "#17231961");
+    shadow.addColorStop(1, "#17231900");
+    ctx.save();
+    ctx.scale(1, .33);
+    oval(ctx, 0, 0, 33, 33, shadow);
+    ctx.restore();
+    if (p.down) ctx.globalAlpha *= .86;
+    ctx.scale(face, 1);
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = "high";
+    ctx.drawImage(sheet, (pose % 4) * 512, Math.floor(pose / 4) * 640, 512, 640, -64, -141.5, 128, 160);
+    ctx.restore();
+    if (p.label) {
+      ctx.save();
+      ctx.textAlign = "center";
+      ctx.font = "800 16px system-ui";
+      ctx.lineWidth = 4;
+      ctx.strokeStyle = "#293021";
+      ctx.strokeText(p.label, p.x, p.y - 142 * scale);
+      ctx.fillStyle = p.cast.color;
+      ctx.fillText(p.label, p.x, p.y - 142 * scale);
+      ctx.restore();
+    }
+  }
+
+  function fallbackHero(ctx, p, time, scale = 1) {
     const c = p.cast;
     const gait = p.moving ? Math.sin(time * (c.kind === "glove" ? 20 : 16) + (p.phase || 0)) : 0;
     const bob = p.moving ? -Math.abs(gait) * 5 : Math.sin(time * 4 + (p.phase || 0)) * 1.75;
@@ -247,6 +321,7 @@ const Art = (() => {
       dash: ["#ffd49f", "#cc7757", "#633f3b"],
       shell: ["#aedde3", "#538aa0", "#364b58"],
       boss: ["#ebc7e8", "#9a589c", "#513650"],
+      gold: ["#fff0a0", "#e5a649", "#805e37"],
     };
     const [light, dark, border] = palettes[e.kind];
     ctx.save();
@@ -274,6 +349,11 @@ const Art = (() => {
       oval(ctx, (x+.025)*r, -.77*r, .034*r, .04*r, "#fff5df");
     }
     oval(ctx, .018*r, -.46*r, .12*r, .064*r, border);
+    if (e.kind === "gold") {
+      star(ctx, 0, -r * 1.69, r * .31, "#fff3b2", "#ae833f", 5);
+      star(ctx, -r * 1.22, -r * .54 + Math.sin(time * 9) * 5, 6, "#ffe48d");
+      star(ctx, r * 1.18, -r * 1.19 + Math.cos(time * 8) * 4, 5, "#fff0b1");
+    }
     if (e.kind === "shell") {
       oval(ctx, -.65*r, -.52*r, .39*r, .54*r, "#90c4ce", border, -.35);
       oval(ctx, .74*r, -.44*r, .30*r, .49*r, "#76aebb", border, .44);
@@ -301,7 +381,7 @@ const Art = (() => {
 
   function item(ctx, item, time) {
     const y = item.y - 16 + Math.sin(time * 5 + item.x) * 4;
-    const colors = { power: "#ffbd73", speed: "#9ee4f3", spark: "#e5b7fe", heal: "#a9ef9a" };
+    const colors = { power: "#ffbd73", speed: "#9ee4f3", spark: "#e5b7fe", heal: "#a9ef9a", star: "#ffe49d" };
     const color = colors[item.kind];
     oval(ctx, item.x, item.y + 3, 20, 7, "#211b1260");
     oval(ctx, item.x, y, 25, 25, color + "22");
@@ -309,16 +389,105 @@ const Art = (() => {
     if (item.kind === "heal") {
       line(ctx, item.x - 7, y, item.x + 7, y, color, 4);
       line(ctx, item.x, y - 7, item.x, y + 7, color, 4);
+    } else if (item.kind === "star") {
+      companion(ctx, item.x, y, time);
     } else {
       star(ctx, item.x, y, 11, color, null, item.kind === "speed" ? 3 : 4);
     }
+  }
+
+  function parcel(ctx, box, time) {
+    ctx.save();
+    ctx.translate(box.x, box.y);
+    oval(ctx, 0, 1, 31, 10, "#24251c55");
+    shape(ctx, () => { ctx.roundRect(-25, -39, 50, 39, 4); }, box.flash > 0 ? "#fff0ca" : gradient(ctx, -39, 0, "#dba878", "#a5704d"), "#674a36", 2.5);
+    shape(ctx, () => { ctx.moveTo(-25, -39); ctx.lineTo(-15, -49); ctx.lineTo(33, -49); ctx.lineTo(25, -39); }, "#f1c995", "#674a36", 2);
+    shape(ctx, () => { ctx.moveTo(25, -39); ctx.lineTo(33, -49); ctx.lineTo(33, -11); ctx.lineTo(25, 0); }, "#986c48", "#674a36", 2);
+    ctx.fillStyle = "#f3d28e";
+    ctx.fillRect(-5, -39, 9, 39);
+    ctx.fillRect(-25, -24, 50, 7);
+    star(ctx, 13, -30, 7, "#fff1bb", "#a47547", 5);
+    if (box.hp < 25) {
+      ctx.beginPath();
+      ctx.moveTo(-15, -35); ctx.lineTo(-10, -26); ctx.lineTo(-17, -17); ctx.lineTo(-12, -9);
+      ctx.strokeStyle = "#795033"; ctx.lineWidth = 2; ctx.stroke();
+    }
+    star(ctx, -27, -48 + Math.sin(time * 2.5 + box.x) * 5, 4.5, "#ffdf9f");
+    ctx.restore();
+  }
+
+  function companion(ctx, x, y, time) {
+    oval(ctx, x, y, 23, 23, "#ffe49620");
+    star(ctx, x, y, 14 + Math.sin(time * 4) * .8, "#ffe597", "#af8147", 5);
+    oval(ctx, x - 3, y - 1, 1.2, 2.1, "#80502f");
+    oval(ctx, x + 3, y - 1, 1.2, 2.1, "#80502f");
+    oval(ctx, x, y + 3.5, 1.5, .7, "#c98351");
+  }
+
+  function fever(ctx, p, time) {
+    ctx.save();
+    ctx.globalCompositeOperation = "screen";
+    ctx.globalAlpha *= .5;
+    ctx.strokeStyle = "#ffd676";
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.ellipse(p.x, p.y - 1, 58, 22, 0, 0, TAU);
+    ctx.stroke();
+    for (let i = 0; i < 3; i++) {
+      const angle = time * 3 + i * TAU / 3;
+      star(ctx, p.x + Math.cos(angle) * 57, p.y - 6 + Math.sin(angle) * 22, 9, "#fff0b1", null, 4);
+    }
+    ctx.restore();
   }
 
   function effect(ctx, f) {
     const age = f.life / f.max;
     ctx.save();
     ctx.globalAlpha = Math.max(0, age);
-    if (f.zap) {
+    if (f.impact) {
+      ctx.translate(f.x, f.y);
+      ctx.scale(1, .62);
+      const radius = f.impact * (1.1 - age * .45);
+      ctx.strokeStyle = "#ffd28b";
+      ctx.lineWidth = age * 6;
+      ctx.beginPath(); ctx.arc(0, 0, radius, 0, TAU); ctx.stroke();
+      ctx.strokeStyle = "#fff0c0";
+      ctx.lineWidth = age * 3;
+      for (let i = 0; i < 7; i++) {
+        const angle = i * TAU / 7 + .3;
+        ctx.beginPath();
+        ctx.moveTo(Math.cos(angle) * radius * .29, Math.sin(angle) * radius * .29);
+        ctx.lineTo(Math.cos(angle + .07) * radius * .64, Math.sin(angle + .07) * radius * .64);
+        ctx.lineTo(Math.cos(angle) * radius, Math.sin(angle) * radius);
+        ctx.stroke();
+      }
+    } else if (f.punch) {
+      ctx.translate(f.x, f.y);
+      ctx.scale(1, .76);
+      ctx.rotate(f.angle);
+      for (let i = -1; i <= 1; i++) {
+        ctx.beginPath();
+        ctx.moveTo(4, i * 13 + f.side * 12);
+        ctx.quadraticCurveTo(f.punch * .48, i * 17 - f.side * 17, f.punch * (1.05 - age * .21), i * 6);
+        ctx.strokeStyle = i === 0 ? "#fff1f8" : "#ffa3d0";
+        ctx.lineCap = "round";
+        ctx.lineWidth = (i === 0 ? 8 : 3) * age;
+        ctx.stroke();
+      }
+      star(ctx, f.punch * (1.05 - age * .21), 0, 20 * age, "#ffe3ed", null, 6);
+    } else if (f.leaves) {
+      ctx.translate(f.x, f.y);
+      const radius = f.leaves * (.62 + (1 - age) * .38);
+      ctx.strokeStyle = "#caef94";
+      ctx.lineWidth = age * 5;
+      ctx.beginPath(); ctx.ellipse(0, 0, radius, radius * .51, 0, 0, TAU); ctx.stroke();
+      for (let i = 0; i < 8; i++) {
+        const angle = i * TAU / 8 + (1 - age) * .7;
+        const x = Math.cos(angle) * radius;
+        const y = Math.sin(angle) * radius * .51;
+        oval(ctx, x, y, 9, 4, i % 2 ? "#efffbb" : "#b9ea8e", null, angle - .5);
+      }
+    } else if (f.zap) {
       ctx.globalCompositeOperation = "screen";
       for (const [color, width] of [[f.color, 15], ["#fff4ff", 3]]) {
         ctx.strokeStyle = color;
@@ -379,5 +548,5 @@ const Art = (() => {
     ctx.restore();
   }
 
-  return { background, hero, enemy, item, effect, star, oval };
+  return { background, hero, heroesReady, enemy, item, parcel, companion, fever, effect, star, oval };
 })();
