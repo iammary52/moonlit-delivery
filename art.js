@@ -182,7 +182,7 @@ const Art = (() => {
 
     const dx = p.renderDirectionX ?? (p.face || 1) * .4;
     const face = Math.abs(dx) > .06 ? Math.sign(dx) : p.face || 1;
-    let pose = Math.floor(time * 4 + (p.phase || 0)) % 4;
+    let pose = 0;
     if (p.down) pose = 15;
     else if (p.hurtPose > 0) pose = 14;
     else if (p.dash > 0) pose = p.dash > .115 ? 12 : 13;
@@ -204,6 +204,13 @@ const Art = (() => {
     ctx.restore();
     if (p.down) ctx.globalAlpha *= .86;
     ctx.scale(face, 1);
+    if (pose === 0) {
+      // Keep the feet anchored while breathing smoothly between display frames.
+      const idlePhase = time * TAU / 2.6 + (p.phase || 0);
+      const breath = (1 + Math.sin(idlePhase)) * .5;
+      ctx.rotate(Math.sin(idlePhase * .5) * .006);
+      ctx.scale(1 - breath * .003, 1 + breath * .014);
+    }
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = "high";
     ctx.drawImage(sheet, (pose % 4) * 512, Math.floor(pose / 4) * 640, 512, 640, -64, -141.5, 128, 160);
